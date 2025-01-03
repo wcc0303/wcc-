@@ -10,7 +10,7 @@ import time
 app = FastAPI()
 
 # Constants
-PROXY_SERVER = "socks5://10.40.96.4:9050"
+PROXY_SERVER = "代理"
 WAIT_SELECTOR = "body"
 
 async def get_page_info(url: str):
