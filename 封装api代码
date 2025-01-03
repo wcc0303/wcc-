@@ -1,0 +1,83 @@
+README.mdfrom PIL import Image
+import io
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from playwright.async_api import async_playwright
+import asyncio
+import base64
+import time
+
+app = FastAPI()
+
+# Constants
+PROXY_SERVER = "socks5://10.40.96.4:9050"
+WAIT_SELECTOR = "body"
+
+async def get_page_info(url: str):
+    """Fetch page info and encode screenshot in Base64 without saving to disk, ensuring complete content with reduced resolution."""
+    retries = 3
+    for attempt in range(retries):
+        try:
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(
+                    headless=True,
+                    args=[f"--proxy-server={PROXY_SERVER}", "--ignore-certificate-errors"]
+                )
+                context = await browser.new_context()
+                page = await context.new_page()
+
+                # Ensure URL has the HTTP prefix
+                if not url.startswith("http://") and not url.startswith("https://"):
+                    url = "http://" + url
+
+                # Intercept unnecessary resources
+                await page.route(
+                    "**/*",
+                    lambda route: route.continue_() if route.request.resource_type not in ["image", "script"] else route.abort()
+                )
+
+                # Navigate to the page
+                response = await page.goto(url, timeout=60000)
+                await page.wait_for_selector(WAIT_SELECTOR, timeout=60000)
+
+                # Get status code and title
+                status_code = response.status if response else None
+                title = await page.title() or "No title found"
+                truncated_title = title[:500]  # Limit title length
+
+                # Take full-page screenshot
+                screenshot = await page.screenshot(full_page=True)
+
+                # Open the screenshot image
+                img = Image.open(io.BytesIO(screenshot))
+
+                # Resize screenshot to reduce resolution
+                resized_img = img.resize((int(img.width / 2), int(img.height / 2)))  # Reduce to half size
+
+                # Convert to JPEG and reduce quality
+                buffer = io.BytesIO()
+                resized_img.save(buffer, format="JPEG", quality=50)  # quality=50 will lower the quality but reduce the size
+                base64_image = base64.b64encode(buffer.getvalue()).decode("utf-8")
+
+                await browser.close()
+
+                return {
+                    "url": url,
+                    "status_code": status_code,
+                    "title": truncated_title,
+                    "base64_image": base64_image
+                }
+        except asyncio.TimeoutError:
+            return {"url": url, "status_code": "Timeout", "title": "Timeout", "base64_image": None}
+        except Exception as e:
+            return {"url": url, "status_code": "Error", "title": str(e)[:500], "base64_image": None}
+
+@app.post("/process")
+async def process_url(url: str):
+    """Process a single URL synchronously and return the response."""
+    start_time = time.time()
+    result = await get_page_info(url)
+    end_time = time.time()
+    runtime = end_time - start_time
+    result["runtime"] = f"{runtime:.2f} seconds"
+    return JSONResponse(content=result)
